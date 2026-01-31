@@ -5,8 +5,11 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -117,7 +120,7 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 			Payload: &Payload{
 				DeviceName: m.deviceName,
 				OS:         runtime.GOOS,
-				Version:    "1.0.0",
+				Version:    "1.0.0", // TODO check if needed
 			},
 		}
 		if err := encoder.Encode(hello); err != nil {
@@ -131,6 +134,13 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 	if err := decoder.Decode(&msg); err != nil {
 		conn.Close()
 		return fmt.Errorf("failed to receive hello: %w", err)
+	}
+
+	// If it's a file offer, handle it immediately
+	if msg.Type == MsgTypeFileOffer {
+		m.logger.Info("Data channel opened for file", "name", msg.Payload.FileName)
+		m.sendFileAccept(conn, "") // TODO for now accept automatically
+		return m.receiveBinaryFile(conn, decoder, msg.Payload.FileName, msg.Payload.Size)
 	}
 
 	if msg.Type != MsgTypeHello {
@@ -173,25 +183,115 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 	}
 
 	for {
-		var msg Message
-		if err := decoder.Decode(&msg); err != nil {
+		var mMsg Message
+		if err := decoder.Decode(&mMsg); err != nil {
 			break
 		}
-
-		peer.LastSeen = time.Now()
-
-		if m.onMessage != nil {
-			m.onMessage(&msg)
+		if mMsg.Type == MsgTypeSync && m.onMessage != nil {
+			m.onMessage(&mMsg)
 		}
 	}
 
-	// Cleanup
+	// Cleanup peer on disconnect
 	m.mu.Lock()
 	delete(m.peers, peer.DeviceID)
 	m.mu.Unlock()
 	conn.Close()
+	return nil
+}
 
-	m.logger.Info("Peer disconnected", "device_name", peer.DeviceName)
+func (m *Manager) receiveBinaryFile(conn net.Conn, decoder *json.Decoder, name string, size int64) error {
+	f, err := os.Create("received_" + name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// check if decoder has buffered data
+	buffered := decoder.Buffered()
+	bufferedBytes, _ := io.ReadAll(buffered)
+
+	bytesToRead := size
+	if len(bufferedBytes) > 0 {
+		n, _ := f.Write(bufferedBytes)
+		bytesToRead -= int64(n)
+	}
+
+	if bytesToRead > 0 {
+		_, err = io.CopyN(f, conn, bytesToRead)
+	}
+
+	m.logger.Info("File saved", "name", name)
+	return err
+}
+
+func (m *Manager) sendFileAccept(conn net.Conn, fileID string) {
+	encoder := json.NewEncoder(conn)
+	acceptMsg := &Message{
+		Type: "file_accept",
+		Payload: &Payload{
+			ContentHash: fileID,
+		},
+	}
+	encoder.Encode(acceptMsg)
+}
+
+func (m *Manager) SendFile(peerID string, filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, _ := file.Stat()
+
+	m.mu.RLock()
+	peer, ok := m.peers[peerID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("peer offline")
+	}
+
+	// New connection for file transfer
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dataConn, err := tls.DialWithDialer(dialer, "tcp", peer.Address, m.tlsConfig)
+	if err != nil {
+		return fmt.Errorf("failed to open data channel: %w", err)
+	}
+	defer dataConn.Close()
+
+	encoder := json.NewEncoder(dataConn)
+	msg := &Message{
+		Type:     "file_offer",
+		DeviceID: m.deviceID,
+		Payload: &Payload{
+			FileName: filepath.Base(filePath),
+			Size:     info.Size(),
+		},
+	}
+
+	if err := encoder.Encode(msg); err != nil {
+		return err
+	}
+
+	// wait for acceptance
+	decoder := json.NewDecoder(dataConn)
+	var resp Message
+	if err := decoder.Decode(&resp); err != nil || resp.Type != "file_accept" {
+		return fmt.Errorf("transfer rejected")
+	}
+
+	_, err = io.Copy(dataConn, file)
+	return err
+}
+
+func (m *Manager) streamFileData(peer *Peer, file *os.File) error {
+	// use io.Copy to stream file data instead of reading into memory
+	n, err := io.Copy(peer.Conn, file)
+	if err != nil {
+		return fmt.Errorf("error during streaming: %w", err)
+	}
+
+	m.logger.Info("Transfer finished successfully", "bytes", n)
 	return nil
 }
 

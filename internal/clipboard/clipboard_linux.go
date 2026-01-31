@@ -54,6 +54,7 @@ func (c *linuxClipboard) Set(content string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("clipboard write failed: %w", err)
 	}
+	c.lastHash = sha256.Sum256([]byte(content)) // prevent feedback loop
 	return nil
 }
 
