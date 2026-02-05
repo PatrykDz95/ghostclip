@@ -1,6 +1,6 @@
 module ghostclip
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/hashicorp/mdns v1.0.6
