@@ -1,0 +1,1 @@
+![ghostclip_logo.svg](ghostclip_logo.svg)
