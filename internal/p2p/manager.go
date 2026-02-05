@@ -201,48 +201,115 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 }
 
 func (m *Manager) receiveBinaryFile(conn net.Conn, decoder *json.Decoder, name string, size int64) error {
-	f, err := os.Create("received_" + name)
+	// Save to Downloads folder
+	savePath, err := getDownloadPath(name)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get download path: %w", err)
+	}
+
+	f, err := os.Create(savePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
 	}
 	defer f.Close()
 
-	// check if decoder has buffered data
+	// Read buffered data from JSON decoder first
 	buffered := decoder.Buffered()
-	bufferedBytes, _ := io.ReadAll(buffered)
+	bufferedBytes, err := io.ReadAll(buffered)
+	if err != nil {
+		return fmt.Errorf("failed to read buffered data: %w", err)
+	}
 
-	bytesToRead := size
+	var written int64
+
+	// Write buffered bytes first
 	if len(bufferedBytes) > 0 {
-		n, _ := f.Write(bufferedBytes)
-		bytesToRead -= int64(n)
+		n, err := f.Write(bufferedBytes)
+		if err != nil {
+			return fmt.Errorf("failed to write buffered data: %w", err)
+		}
+		written = int64(n)
 	}
 
-	if bytesToRead > 0 {
-		_, err = io.CopyN(f, conn, bytesToRead)
+	// Read remaining bytes directly from connection
+	remaining := size - written
+	if remaining > 0 {
+		n, err := io.CopyN(f, conn, remaining)
+		if err != nil {
+			return fmt.Errorf("failed to read file data: %w (read %d of %d)", err, written+n, size)
+		}
+		written += n
 	}
 
-	m.logger.Info("File saved", "name", name)
-	return err
+	m.logger.Info("File saved", "path", savePath, "size", written)
+	return nil
 }
 
-func (m *Manager) sendFileAccept(conn net.Conn, fileID string) {
+func getDownloadPath(filename string) (string, error) {
+	var downloadDir string
+
+	switch runtime.GOOS {
+	case "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		downloadDir = filepath.Join(home, "Downloads")
+	case "windows":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		downloadDir = filepath.Join(home, "Downloads")
+	default: // linux
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		downloadDir = filepath.Join(home, "Downloads")
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		return "", err
+	}
+
+	// Handle duplicate filenames
+	savePath := filepath.Join(downloadDir, filename)
+	if _, err := os.Stat(savePath); err == nil {
+		// File exists, add timestamp
+		ext := filepath.Ext(filename)
+		base := filename[:len(filename)-len(ext)]
+		savePath = filepath.Join(downloadDir, fmt.Sprintf("%s_%d%s", base, time.Now().Unix(), ext))
+	}
+
+	return savePath, nil
+}
+
+func (m *Manager) sendFileAccept(conn net.Conn, fileID string) error {
 	encoder := json.NewEncoder(conn)
 	acceptMsg := &Message{
-		Type: "file_accept",
+		Type:      MsgTypeFileAccept,
+		DeviceID:  m.deviceID,
+		Timestamp: time.Now(),
 		Payload: &Payload{
 			ContentHash: fileID,
 		},
 	}
-	encoder.Encode(acceptMsg)
+	return encoder.Encode(acceptMsg)
 }
 
 func (m *Manager) SendFile(peerID string, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
-	info, _ := file.Stat()
+
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
 
 	m.mu.RLock()
 	peer, ok := m.peers[peerID]
@@ -259,9 +326,10 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 	}
 	defer dataConn.Close()
 
+	// Send file offer
 	encoder := json.NewEncoder(dataConn)
 	msg := &Message{
-		Type:     "file_offer",
+		Type:     MsgTypeFileOffer,
 		DeviceID: m.deviceID,
 		Payload: &Payload{
 			FileName: filepath.Base(filePath),
@@ -270,18 +338,27 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 	}
 
 	if err := encoder.Encode(msg); err != nil {
-		return err
+		return fmt.Errorf("failed to send file offer: %w", err)
 	}
 
-	// wait for acceptance
+	// Wait for acceptance
 	decoder := json.NewDecoder(dataConn)
 	var resp Message
-	if err := decoder.Decode(&resp); err != nil || resp.Type != "file_accept" {
-		return fmt.Errorf("transfer rejected")
+	if err := decoder.Decode(&resp); err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.Type != MsgTypeFileAccept {
+		return fmt.Errorf("transfer rejected: %s", resp.Type)
 	}
 
-	_, err = io.Copy(dataConn, file)
-	return err
+	// Send file data
+	written, err := io.Copy(dataConn, file)
+	if err != nil {
+		return fmt.Errorf("failed to send file data: %w", err)
+	}
+
+	m.logger.Info("File sent", "name", filepath.Base(filePath), "size", written)
+	return nil
 }
 
 func (m *Manager) streamFileData(peer *Peer, file *os.File) error {

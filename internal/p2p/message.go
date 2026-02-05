@@ -3,9 +3,10 @@ package p2p
 import "time"
 
 const (
-	MsgTypeHello     = "hello"
-	MsgTypeSync      = "sync"
-	MsgTypeFileOffer = "file_offer"
+	MsgTypeHello      = "hello"
+	MsgTypeSync       = "sync"
+	MsgTypeFileOffer  = "file_offer"
+	MsgTypeFileAccept = "file_accept"
 )
 
 type Message struct {
