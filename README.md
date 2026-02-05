@@ -1,1 +1,1 @@
-![ghostclip_logo.svg](ghostclip_logo.svg)
+![ghostclip_logox400.png](cmd/ghostclip/assets/ghostclip_logox400.png)
