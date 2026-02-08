@@ -25,7 +25,11 @@ type Manager struct {
 	lastHash   string
 	tlsConfig  *tls.Config
 	logger     *slog.Logger
+
+	onFileReceive FileReceiveCallback
 }
+
+type FileReceiveCallback func(senderName, fileName string, fileSize int64) (bool, string)
 
 func NewManager(deviceID, deviceName string, port int, tlsConfig *tls.Config, logger *slog.Logger) *Manager {
 	if logger == nil {
@@ -45,6 +49,11 @@ func NewManager(deviceID, deviceName string, port int, tlsConfig *tls.Config, lo
 // SetOnMessage sets the callback for incoming messages
 func (m *Manager) SetOnMessage(callback func(*Message)) {
 	m.onMessage = callback
+}
+
+// set callback for incoming file offers
+func (m *Manager) SetOnFileReceive(callback FileReceiveCallback) {
+	m.onFileReceive = callback
 }
 
 // Listen starts the TLS listener for incoming connections
@@ -120,7 +129,7 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 			Payload: &Payload{
 				DeviceName: m.deviceName,
 				OS:         runtime.GOOS,
-				Version:    "1.0.0", // TODO check if needed
+				Version:    "1.0.0",
 			},
 		}
 		if err := encoder.Encode(hello); err != nil {
@@ -136,11 +145,52 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 		return fmt.Errorf("failed to receive hello: %w", err)
 	}
 
-	// If it's a file offer, handle it immediately
+	// receive file offer and handle it
 	if msg.Type == MsgTypeFileOffer {
-		m.logger.Info("Data channel opened for file", "name", msg.Payload.FileName)
-		m.sendFileAccept(conn, "") // TODO for now accept automatically
-		return m.receiveBinaryFile(conn, decoder, msg.Payload.FileName, msg.Payload.Size)
+		fileName := msg.Payload.FileName
+		fileSize := msg.Payload.Size
+		senderName := "Unknown"
+
+		m.logger.Info("File offer received", "file", fileName, "size", fileSize)
+
+		// find sender's name from peers list
+		m.mu.RLock()
+		if peer, exists := m.peers[msg.DeviceID]; exists {
+			senderName = peer.DeviceName
+		}
+		m.mu.RUnlock()
+
+		var accepted bool
+		var savePath string
+
+		if m.onFileReceive != nil {
+			accepted, savePath = m.onFileReceive(senderName, fileName, fileSize)
+		} else {
+			m.logger.Warn("No file receive callback set - auto-accepting")
+			accepted = true
+			var err error
+			savePath, err = getDownloadPath(fileName)
+			if err != nil {
+				m.logger.Error("Failed to get download path", "error", err)
+				conn.Close()
+				return err
+			}
+		}
+
+		if !accepted {
+			m.logger.Info("File transfer rejected by user", "file", fileName)
+			conn.Close()
+			return nil
+		}
+
+		m.logger.Info("File transfer accepted", "file", fileName, "save_path", savePath)
+
+		if err := m.sendFileAccept(conn, ""); err != nil {
+			m.logger.Error("Failed to send acceptance", "error", err)
+			conn.Close()
+			return err
+		}
+		return m.receiveBinaryFileToPath(conn, decoder, fileName, fileSize, savePath)
 	}
 
 	if msg.Type != MsgTypeHello {
@@ -200,11 +250,12 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 	return nil
 }
 
-func (m *Manager) receiveBinaryFile(conn net.Conn, decoder *json.Decoder, name string, size int64) error {
-	// Save to Downloads folder
-	savePath, err := getDownloadPath(name)
-	if err != nil {
-		return fmt.Errorf("failed to get download path: %w", err)
+func (m *Manager) receiveBinaryFileToPath(conn net.Conn, decoder *json.Decoder, name string, size int64, savePath string) error {
+	m.logger.Info("Starting file download", "file", name, "size", size, "path", savePath)
+
+	dir := filepath.Dir(savePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	f, err := os.Create(savePath)
@@ -241,8 +292,16 @@ func (m *Manager) receiveBinaryFile(conn net.Conn, decoder *json.Decoder, name s
 		written += n
 	}
 
-	m.logger.Info("File saved", "path", savePath, "size", written)
+	m.logger.Info("File saved successfully!", "path", savePath, "size", written)
 	return nil
+}
+
+func (m *Manager) receiveBinaryFile(conn net.Conn, decoder *json.Decoder, name string, size int64) error {
+	savePath, err := getDownloadPath(name)
+	if err != nil {
+		return fmt.Errorf("failed to get download path: %w", err)
+	}
+	return m.receiveBinaryFileToPath(conn, decoder, name, size, savePath)
 }
 
 func getDownloadPath(filename string) (string, error) {
