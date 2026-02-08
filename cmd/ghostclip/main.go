@@ -18,7 +18,9 @@ import (
 	"ghostclip/internal/p2p"
 	"ghostclip/internal/security"
 
+	"github.com/gen2brain/beeep"
 	"github.com/getlantern/systray"
+	"github.com/sqweek/dialog"
 )
 
 //go:embed assets/ghostclip_logox48.ico
@@ -114,12 +116,6 @@ func startBackend() {
 		file = os.Stderr
 	}
 
-	// for debuging only. Remove in production
-	//multiWriter := io.MultiWriter(file, os.Stdout)
-	//logger = slog.New(slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
-	//	Level: logLevel,
-	//}))
-
 	logger = slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
@@ -139,7 +135,7 @@ func startBackend() {
 		"os", runtime.GOOS,
 	)
 
-	updateStatus("Checking dependencies...")
+	updateStatus("Checking dependencies")
 
 	// Check dependencies (Linux only)
 	if !checkLinuxDependencies(logger) {
@@ -149,7 +145,7 @@ func startBackend() {
 	}
 
 	// Initialize TLS
-	updateStatus("Generating certificates...")
+	updateStatus("Generating certificates")
 	cert, err := security.GenerateSelfSignedCert(certDir, deviceID)
 	if err != nil {
 		updateStatus("Certificate error")
@@ -160,7 +156,7 @@ func startBackend() {
 	tlsConfig := security.CreateTLSConfig(cert)
 
 	// Initialize clipboard
-	updateStatus("Initializing clipboard...")
+	updateStatus("Initializing clipboard")
 	cb, err = clipboard.New()
 	if err != nil {
 		updateStatus("Clipboard error")
@@ -169,7 +165,7 @@ func startBackend() {
 	}
 
 	// Initialize P2P
-	updateStatus("Starting network...")
+	updateStatus("Starting network")
 	p2pMgr = p2p.NewManager(deviceID, *deviceName, *port, tlsConfig, logger)
 
 	// Set message callback
@@ -183,6 +179,8 @@ func startBackend() {
 			}
 		}
 	})
+
+	p2pMgr.SetOnFileReceive(handleIncomingFile)
 
 	// Start listener
 	if err := p2pMgr.Listen(); err != nil {
@@ -200,7 +198,6 @@ func startBackend() {
 			logger.Error("Failed to connect to peer", "peer", peerID, "error", err)
 		} else {
 			updatePeerMenu()
-			//updateDeviceCount()
 		}
 	})
 
@@ -242,6 +239,62 @@ func startBackend() {
 	logger.Info("Ghostclip started successfully")
 }
 
+func handleIncomingFile(senderName, fileName string, fileSize int64) (bool, string) {
+
+	playNotificationSound()
+
+	notificationTitle := "Incoming File Transfer"
+	notificationMsg := fmt.Sprintf("%s wants to send you:\n%s (%.2f MB)",
+		senderName, fileName, float64(fileSize)/(1024*1024))
+
+	err := beeep.Notify(notificationTitle, notificationMsg, "")
+	if err != nil {
+		logger.Warn("Failed to show notification", "error", err)
+	}
+
+	response := dialog.Message("%s wants to send you a file:\n\n%s\n\nSize: %.2f MB\n\nDo you want to accept?",
+		senderName, fileName, float64(fileSize)/(1024*1024)).
+		Title("Incoming File Transfer").
+		YesNo()
+
+	if !response {
+		logger.Info("File transfer rejected by user", "file", fileName)
+		playRejectionSound()
+		return false, ""
+	}
+
+	logger.Info("File transfer accepted", "file", fileName)
+
+	receivedDir := getReceivedFilesDir()
+	os.MkdirAll(receivedDir, 0755)
+	savePath := filepath.Join(receivedDir, fileName)
+
+	logger.Info("File will be saved to", "path", savePath)
+	return true, savePath
+}
+
+func playNotificationSound() {
+	err := beeep.Beep(beeep.DefaultFreq, beeep.DefaultDuration)
+	if err != nil {
+		logger.Warn("Failed to play notification sound", "error", err)
+	}
+}
+
+func playRejectionSound() {
+	err := beeep.Beep(400, 200)
+	if err != nil {
+		logger.Warn("Failed to play rejection sound", "error", err)
+	}
+}
+
+func getReceivedFilesDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "received-files"
+	}
+	return filepath.Join(home, "Ghostclip", "Received Files")
+}
+
 func updateStatus(status string) {
 	if mStatus != nil {
 		mStatus.SetTitle(status)
@@ -259,7 +312,7 @@ func onExit() {
 		cancel()
 	}
 	if logger != nil {
-		logger.Info("Ghostclip stopped")
+		logger.Info("Ghostclip  application stopped")
 	}
 }
 
