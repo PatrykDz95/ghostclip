@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
@@ -117,7 +118,8 @@ func (m *Manager) Connect(deviceID, address string) error {
 }
 
 func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
-	decoder := json.NewDecoder(conn)
+	reader := bufio.NewReader(conn)
+	decoder := json.NewDecoder(reader)
 	encoder := json.NewEncoder(conn)
 
 	// send HELLO if initiator
@@ -190,7 +192,7 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 			conn.Close()
 			return err
 		}
-		return m.receiveBinaryFileToPath(conn, decoder, fileName, fileSize, savePath)
+		return m.receiveBinaryFileToPath(reader, decoder, fileName, fileSize, savePath)
 	}
 
 	if msg.Type != MsgTypeHello {
@@ -250,7 +252,7 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 	return nil
 }
 
-func (m *Manager) receiveBinaryFileToPath(conn net.Conn, decoder *json.Decoder, name string, size int64, savePath string) error {
+func (m *Manager) receiveBinaryFileToPath(reader io.Reader, decoder *json.Decoder, name string, size int64, savePath string) error {
 	m.logger.Info("Starting file download", "file", name, "size", size, "path", savePath)
 
 	dir := filepath.Dir(savePath)
@@ -264,35 +266,40 @@ func (m *Manager) receiveBinaryFileToPath(conn net.Conn, decoder *json.Decoder, 
 	}
 	defer f.Close()
 
-	// Read buffered data from JSON decoder first
-	buffered := decoder.Buffered()
-	bufferedBytes, err := io.ReadAll(buffered)
+	// check and skip leading newline if present to prevent corruption of binary files
+	var written int64 = 0
+
+	// use bufio.Reader to peek the first byte without consuming it
+	var br *bufio.Reader
+	if bufReader, ok := reader.(*bufio.Reader); ok {
+		br = bufReader
+	} else {
+		br = bufio.NewReader(reader)
+	}
+
+	firstByte, err := br.Peek(1)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("peek failed: %w", err)
+	}
+
+	// if new line is present, skip it
+	if len(firstByte) > 0 && (firstByte[0] == 0x0a || firstByte[0] == 0x0d) {
+		br.ReadByte()
+		m.logger.Debug("Skipped leading newline")
+	}
+
+	written, err = io.CopyN(f, br, size)
+
 	if err != nil {
-		return fmt.Errorf("failed to read buffered data: %w", err)
+		return fmt.Errorf("copy failed: %w (got %d/%d)", err, written, size)
 	}
 
-	var written int64
-
-	// Write buffered bytes first
-	if len(bufferedBytes) > 0 {
-		n, err := f.Write(bufferedBytes)
-		if err != nil {
-			return fmt.Errorf("failed to write buffered data: %w", err)
-		}
-		written = int64(n)
+	if written != size {
+		return fmt.Errorf("size mismatch: %d != %d", written, size)
 	}
 
-	// Read remaining bytes directly from connection
-	remaining := size - written
-	if remaining > 0 {
-		n, err := io.CopyN(f, conn, remaining)
-		if err != nil {
-			return fmt.Errorf("failed to read file data: %w (read %d of %d)", err, written+n, size)
-		}
-		written += n
-	}
-
-	m.logger.Info("File saved successfully!", "path", savePath, "size", written)
+	f.Sync()
+	m.logger.Info("Saved", "bytes", written)
 	return nil
 }
 
