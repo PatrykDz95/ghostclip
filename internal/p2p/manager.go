@@ -1,7 +1,6 @@
 package p2p
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
@@ -132,87 +131,99 @@ func (m *Manager) Connect(deviceID, address string) error {
 	return m.handleConnection(conn, true)
 }
 
+func (m *Manager) newHelloMessage() *Message {
+	return &Message{
+		Type:      MsgTypeHello,
+		DeviceID:  m.deviceID,
+		Timestamp: time.Now(),
+		Payload: &Payload{
+			DeviceName: m.deviceName,
+			OS:         runtime.GOOS,
+		},
+	}
+}
+
 func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
-	reader := bufio.NewReader(conn)
-	decoder := json.NewDecoder(reader)
+	defer func() {
+		if err := conn.Close(); err != nil {
+			m.logger.Debug("Failed to close connection", "error", err)
+		}
+	}()
+
+	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
 
-	// send HELLO if initiator
 	if initiator {
-		hello := &Message{
-			Type:      MsgTypeHello,
-			DeviceID:  m.deviceID,
-			Timestamp: time.Now(),
-			Payload: &Payload{
-				DeviceName: m.deviceName,
-				OS:         runtime.GOOS,
-				Version:    "1.0.0",
-			},
-		}
-		if err := encoder.Encode(hello); err != nil {
-			conn.Close()
+		if err := encoder.Encode(m.newHelloMessage()); err != nil {
 			return fmt.Errorf("failed to send hello: %w", err)
 		}
 	}
 
-	// receive HELLO
 	var msg Message
 	if err := decoder.Decode(&msg); err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to receive hello: %w", err)
+		return fmt.Errorf("failed to decode message: %w", err)
 	}
 
-	// receive file offer and handle it
-	if msg.Type == MsgTypeFileOffer {
-		fileName := msg.Payload.FileName
-		fileSize := msg.Payload.Size
-		senderName := "Unknown"
+	switch msg.Type {
+	case MsgTypeFileOffer:
+		return m.handleFileOffer(conn, &msg)
+	case MsgTypeHello:
+		return m.handlePeerSession(conn, &msg, encoder, decoder, initiator)
+	default:
+		return fmt.Errorf("unexpected message type: %s", msg.Type)
+	}
+}
 
-		m.logger.Info("File offer received", "file", fileName, "size", fileSize)
+func (m *Manager) handleFileOffer(conn net.Conn, msg *Message) error {
+	fileName := msg.Payload.FileName
+	fileSize := msg.Payload.Size
 
-		// find sender's name from peers list
-		m.mu.RLock()
-		if peer, exists := m.peers[msg.DeviceID]; exists {
-			senderName = peer.DeviceName
-		}
-		m.mu.RUnlock()
+	m.logger.Info("File offer received", "file", fileName, "size", fileSize)
 
-		var accepted bool
-		var savePath string
+	senderName := m.getSenderName(msg.DeviceID)
+	accepted, savePath := m.resolveFileAcceptance(senderName, fileName, fileSize)
 
-		if m.onFileReceive != nil {
-			accepted, savePath = m.onFileReceive(senderName, fileName, fileSize)
-		} else {
-			m.logger.Warn("No file receive callback set - auto-accepting")
-			accepted = true
-			var err error
-			savePath, err = getDownloadPath(fileName)
-			if err != nil {
-				m.logger.Error("Failed to get download path", "error", err)
-				conn.Close()
-				return err
-			}
-		}
-
-		if !accepted {
-			m.logger.Info("File transfer rejected by user", "file", fileName)
-			conn.Close()
-			return nil
-		}
-
-		m.logger.Info("File transfer accepted", "file", fileName, "save_path", savePath)
-
-		if err := m.sendFileAccept(conn, ""); err != nil {
-			m.logger.Error("Failed to send acceptance", "error", err)
-			conn.Close()
-			return err
-		}
-		return m.receiveBinaryFileToPath(conn, fileName, fileSize, savePath)
+	if !accepted {
+		m.logger.Info("File transfer rejected by user", "file", fileName)
+		return nil
 	}
 
-	if msg.Type != MsgTypeHello {
-		conn.Close()
-		return fmt.Errorf("expected hello, got %s", msg.Type)
+	m.logger.Info("File transfer accepted", "file", fileName, "save_path", savePath)
+
+	if err := m.sendFileAccept(conn, ""); err != nil {
+		return fmt.Errorf("failed to send acceptance: %w", err)
+	}
+
+	return m.receiveBinaryFileToPath(conn, fileName, fileSize, savePath)
+}
+
+func (m *Manager) getSenderName(deviceID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if peer, exists := m.peers[deviceID]; exists {
+		return peer.DeviceName
+	}
+	return "Unknown"
+}
+
+func (m *Manager) resolveFileAcceptance(senderName, fileName string, fileSize int64) (bool, string) {
+	if m.onFileReceive != nil {
+		return m.onFileReceive(senderName, fileName, fileSize)
+	}
+
+	m.logger.Warn("No file receive callback set - auto-accepting")
+	savePath, err := getDownloadPath(fileName)
+	if err != nil {
+		m.logger.Error("Failed to get download path", "error", err)
+		return false, ""
+	}
+	return true, savePath
+}
+
+func (m *Manager) handlePeerSession(conn net.Conn, msg *Message, encoder *json.Encoder, decoder *json.Decoder, initiator bool) error {
+	if msg.DeviceID == "" || msg.Payload == nil || msg.Payload.DeviceName == "" {
+		return fmt.Errorf("invalid hello: missing required fields")
 	}
 
 	peer := &Peer{
@@ -228,43 +239,35 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 	m.peers[msg.DeviceID] = peer
 	m.mu.Unlock()
 
+	defer func() {
+		m.mu.Lock()
+		delete(m.peers, peer.DeviceID)
+		m.mu.Unlock()
+	}()
+
 	m.logger.Info("Peer connected",
 		"device_name", peer.DeviceName,
 		"device_id", peer.DeviceID,
 		"os", peer.OS,
 	)
 
-	// send HELLO if not initiator
 	if !initiator {
-		hello := &Message{
-			Type:      MsgTypeHello,
-			DeviceID:  m.deviceID,
-			Timestamp: time.Now(),
-			Payload: &Payload{
-				DeviceName: m.deviceName,
-				OS:         runtime.GOOS,
-				Version:    "1.0.0",
-			},
+		if err := encoder.Encode(m.newHelloMessage()); err != nil {
+			return fmt.Errorf("failed to send hello response: %w", err)
 		}
-		encoder.Encode(hello)
 	}
 
+	// Message loop
 	for {
 		var mMsg Message
 		if err := decoder.Decode(&mMsg); err != nil {
-			break
+			m.logger.Debug("Peer disconnected", "peer", peer.DeviceName, "error", err)
+			return nil
 		}
 		if mMsg.Type == MsgTypeSync && m.onMessage != nil {
 			m.onMessage(&mMsg)
 		}
 	}
-
-	// Cleanup peer on disconnect
-	m.mu.Lock()
-	delete(m.peers, peer.DeviceID)
-	m.mu.Unlock()
-	conn.Close()
-	return nil
 }
 
 func (m *Manager) receiveBinaryFileToPath(reader io.Reader, name string, expectedSize int64, savePath string) error {

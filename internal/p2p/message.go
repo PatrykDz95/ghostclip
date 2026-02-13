@@ -28,7 +28,6 @@ type Payload struct {
 	// MsgTypeHello device info
 	DeviceName string `json:"device_name,omitempty"`
 	OS         string `json:"os,omitempty"`
-	Version    string `json:"version,omitempty"`
 
 	// MsgTypeSync clipboard content
 	ClipboardContent string `json:"clipboard_content,omitempty"`

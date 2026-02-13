@@ -1,4 +1,4 @@
-package main
+package app
 
 func (app *Application) handlePeerDiscovered(peerID, addr string) {
 	app.logger.Info("Discovered peer", "peer_id", peerID, "addr", addr)

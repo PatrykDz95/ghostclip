@@ -1,22 +1,16 @@
-package main
+package app
 
 import (
 	"context"
 	"fmt"
+	"ghostclip/internal/clipboard"
+	"ghostclip/internal/p2p"
+	"ghostclip/internal/security"
 	"log/slog"
 	"os"
 	"runtime"
 
-	"ghostclip/internal/clipboard"
-	"ghostclip/internal/p2p"
-	"ghostclip/internal/security"
-
 	"github.com/getlantern/systray"
-)
-
-const (
-	version     = "1.0.0"
-	defaultPort = 9876
 )
 
 type Application struct {
@@ -27,11 +21,13 @@ type Application struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	ui *UI
+	ui       *UI
+	iconData []byte
 }
 
-func NewApplication() *Application {
+func NewApplication(iconData []byte) *Application {
 	return &Application{
+		iconData: iconData,
 		ui: &UI{
 			peerMenuItems:   make(map[string]*systray.MenuItem),
 			peerCancelFuncs: make(map[string]context.CancelFunc),
@@ -39,8 +35,8 @@ func NewApplication() *Application {
 	}
 }
 
-func (app *Application) onReady() {
-	systray.SetIcon(iconData)
+func (app *Application) OnReady() {
+	systray.SetIcon(app.iconData)
 	systray.SetTitle("Ghostclip")
 	systray.SetTooltip("Ghostclip - Starting...")
 
@@ -48,7 +44,7 @@ func (app *Application) onReady() {
 	go app.startBackend()
 }
 
-func (app *Application) onExit() {
+func (app *Application) OnExit() {
 	if app.cancel != nil {
 		app.cancel()
 	}
@@ -71,7 +67,6 @@ func (app *Application) startBackend() {
 	deviceID := generateDeviceID()
 
 	app.logger.Info("Starting Ghostclip",
-		"version", version,
 		"device", cfg.DeviceName,
 		"device_id", deviceID,
 		"os", runtime.GOOS,
@@ -172,7 +167,12 @@ func (app *Application) startServices(cfg *Config, deviceID string) error {
 		go app.connectToManualPeer(cfg.PeerAddr)
 	}
 
-	go app.startClipboardMonitoring()
+	go func() {
+		err := app.startClipboardMonitoring()
+		if err != nil {
+			app.logger.Error("Clipboard monitoring error", "error", err)
+		}
+	}()
 
 	return nil
 }

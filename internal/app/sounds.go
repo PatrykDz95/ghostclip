@@ -1,6 +1,8 @@
-package main
+package app
 
-import "github.com/gen2brain/beeep"
+import (
+	"github.com/gen2brain/beeep"
+)
 
 func (app *Application) playNotificationSound() {
 	if err := beeep.Beep(beeep.DefaultFreq, beeep.DefaultDuration); err != nil {

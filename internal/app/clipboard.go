@@ -1,4 +1,4 @@
-package main
+package app
 
 import "ghostclip/internal/p2p"
 
@@ -17,8 +17,8 @@ func (app *Application) handleClipboardSync(msg *p2p.Message) {
 	app.logger.Info("Clipboard synced", "size", len(content))
 }
 
-func (app *Application) startClipboardMonitoring() {
-	app.clipboard.Watch(func(content string) {
+func (app *Application) startClipboardMonitoring() error {
+	return app.clipboard.Watch(func(content string) {
 		app.logger.Info("Local clipboard changed", "size", len(content))
 		app.p2pMgr.BroadcastClipBoard(content)
 	})

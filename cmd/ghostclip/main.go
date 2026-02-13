@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 
+	"ghostclip/internal/app"
+
 	"github.com/getlantern/systray"
 )
 
@@ -15,6 +17,6 @@ func main() {
 	// Suppress mdns warnings
 	log.SetOutput(io.Discard)
 
-	app := NewApplication()
-	systray.Run(app.onReady, app.onExit)
+	application := app.NewApplication(iconData)
+	systray.Run(application.OnReady, application.OnExit)
 }

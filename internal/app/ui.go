@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -147,5 +147,5 @@ func (app *Application) handlePeerClick(ctx context.Context, deviceID string, it
 
 func (app *Application) showAbout() {
 	app.logger.Info("About clicked")
-	fmt.Printf("Ghostclip v%s\nSecure P2P clipboard sync\n", version)
+	fmt.Printf("Ghostclip Secure P2P clipboard sync\n")
 }
