@@ -24,7 +24,8 @@ type Manager struct {
 	mu         sync.RWMutex
 	onMessage  func(*Message)
 	lastHash   string
-	tlsConfig  *tls.Config
+	serverTLS  *tls.Config
+	clientTLS  *tls.Config
 	logger     *slog.Logger
 
 	onFileReceive FileReceiveCallback
@@ -32,7 +33,7 @@ type Manager struct {
 
 type FileReceiveCallback func(senderName, fileName string, fileSize int64) (bool, string)
 
-func NewManager(deviceID, deviceName string, port int, tlsConfig *tls.Config, logger *slog.Logger) *Manager {
+func NewManager(deviceID, deviceName string, port int, cert *tls.Certificate, logger *slog.Logger) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -42,8 +43,17 @@ func NewManager(deviceID, deviceName string, port int, tlsConfig *tls.Config, lo
 		deviceName: deviceName,
 		port:       port,
 		peers:      make(map[string]*Peer),
-		tlsConfig:  tlsConfig,
-		logger:     logger,
+		serverTLS: &tls.Config{
+			Certificates: []tls.Certificate{*cert},
+			ClientAuth:   tls.RequireAnyClientCert,
+			MinVersion:   tls.VersionTLS13,
+		},
+		clientTLS: &tls.Config{
+			Certificates:       []tls.Certificate{*cert},
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS13,
+		},
+		logger: logger,
 	}
 }
 
@@ -59,7 +69,7 @@ func (m *Manager) SetOnFileReceive(callback FileReceiveCallback) {
 
 // Listen starts the TLS listener for incoming connections
 func (m *Manager) Listen() error {
-	listener, err := tls.Listen("tcp", fmt.Sprintf(":%d", m.port), m.tlsConfig)
+	listener, err := tls.Listen("tcp", fmt.Sprintf(":%d", m.port), m.serverTLS)
 	if err != nil {
 		return fmt.Errorf("failed to start TLS listener: %w", err)
 	}
@@ -107,7 +117,7 @@ func (m *Manager) Connect(deviceID, address string) error {
 	}
 
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", address, m.tlsConfig)
+	conn, err := tls.DialWithDialer(dialer, "tcp", address, m.clientTLS)
 	if err != nil {
 		return fmt.Errorf("TLS dial failed: %w", err)
 	}
@@ -391,7 +401,7 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 
 	// New connection for file transfer
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	dataConn, err := tls.DialWithDialer(dialer, "tcp", peer.Address, m.tlsConfig)
+	dataConn, err := tls.DialWithDialer(dialer, "tcp", peer.Address, m.clientTLS)
 	if err != nil {
 		return fmt.Errorf("failed to open data channel: %w", err)
 	}
