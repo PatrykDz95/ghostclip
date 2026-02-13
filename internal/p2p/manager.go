@@ -427,17 +427,6 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 	return nil
 }
 
-func (m *Manager) streamFileData(peer *Peer, file *os.File) error {
-	// use io.Copy to stream file data instead of reading into memory
-	n, err := io.Copy(peer.Conn, file)
-	if err != nil {
-		return fmt.Errorf("error during streaming: %w", err)
-	}
-
-	m.logger.Info("Transfer finished successfully", "bytes", n)
-	return nil
-}
-
 func (m *Manager) BroadcastClipBoard(content string) {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
