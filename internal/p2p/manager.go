@@ -197,7 +197,7 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 			conn.Close()
 			return err
 		}
-		return m.receiveBinaryFileToPath(reader, decoder, fileName, fileSize, savePath)
+		return m.receiveBinaryFileToPath(conn, fileName, fileSize, savePath)
 	}
 
 	if msg.Type != MsgTypeHello {
@@ -257,8 +257,8 @@ func (m *Manager) handleConnection(conn net.Conn, initiator bool) error {
 	return nil
 }
 
-func (m *Manager) receiveBinaryFileToPath(reader io.Reader, decoder *json.Decoder, name string, size int64, savePath string) error {
-	m.logger.Info("Starting file download", "file", name, "size", size, "path", savePath)
+func (m *Manager) receiveBinaryFileToPath(reader io.Reader, name string, expectedSize int64, savePath string) error {
+	m.logger.Info("Starting file download", "file", name, "size", expectedSize, "path", savePath)
 
 	dir := filepath.Dir(savePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -269,51 +269,47 @@ func (m *Manager) receiveBinaryFileToPath(reader io.Reader, decoder *json.Decode
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			m.logger.Error("Failed to close file", "error", err)
+		}
+	}()
 
-	// check and skip leading newline if present to prevent corruption of binary files
-	var written int64 = 0
-
-	// use bufio.Reader to peek the first byte without consuming it
-	var br *bufio.Reader
-	if bufReader, ok := reader.(*bufio.Reader); ok {
-		br = bufReader
-	} else {
-		br = bufio.NewReader(reader)
+	// Read binary file header [magic:4][size:8]
+	size, err := ReadFileHeader(reader)
+	if err != nil {
+		return fmt.Errorf("failed to read file header: %w", err)
 	}
 
-	firstByte, err := br.Peek(1)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("peek failed: %w", err)
+	// Verify size matches what was offered
+	if size != expectedSize {
+		return fmt.Errorf("size mismatch in header: got %d, expected %d", size, expectedSize)
 	}
 
-	// if new line is present, skip it
-	if len(firstByte) > 0 && (firstByte[0] == 0x0a || firstByte[0] == 0x0d) {
-		br.ReadByte()
-		m.logger.Debug("Skipped leading newline")
-	}
-
-	written, err = io.CopyN(f, br, size)
-
+	// Read exact number of bytes
+	written, err := io.CopyN(f, reader, size)
 	if err != nil {
 		return fmt.Errorf("copy failed: %w (got %d/%d)", err, written, size)
 	}
 
 	if written != size {
-		return fmt.Errorf("size mismatch: %d != %d", written, size)
+		return fmt.Errorf("size mismatch: wrote %d, expected %d", written, size)
 	}
 
-	f.Sync()
-	m.logger.Info("Saved", "bytes", written)
+	if err := f.Sync(); err != nil {
+		m.logger.Warn("Failed to sync file", "error", err)
+	}
+
+	m.logger.Info("File saved successfully", "bytes", written, "path", savePath)
 	return nil
 }
 
-func (m *Manager) receiveBinaryFile(conn net.Conn, decoder *json.Decoder, name string, size int64) error {
+func (m *Manager) receiveBinaryFile(conn net.Conn, name string, size int64) error {
 	savePath, err := getDownloadPath(name)
 	if err != nil {
 		return fmt.Errorf("failed to get download path: %w", err)
 	}
-	return m.receiveBinaryFileToPath(conn, decoder, name, size, savePath)
+	return m.receiveBinaryFileToPath(conn, name, size, savePath)
 }
 
 func getDownloadPath(filename string) (string, error) {
@@ -375,7 +371,11 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			m.logger.Error("Failed to close file", "error", err)
+		}
+	}()
 
 	info, err := file.Stat()
 	if err != nil {
@@ -386,7 +386,7 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 	peer, ok := m.peers[peerID]
 	m.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("peer offline")
+		return fmt.Errorf("peer %s offline", peerID)
 	}
 
 	// New connection for file transfer
@@ -395,9 +395,13 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open data channel: %w", err)
 	}
-	defer dataConn.Close()
+	defer func() {
+		if err := dataConn.Close(); err != nil {
+			m.logger.Debug("Failed to close data connection", "error", err)
+		}
+	}()
 
-	// Send file offer
+	// Send file offer (JSON)
 	encoder := json.NewEncoder(dataConn)
 	msg := &Message{
 		Type:     MsgTypeFileOffer,
@@ -412,7 +416,7 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 		return fmt.Errorf("failed to send file offer: %w", err)
 	}
 
-	// Wait for acceptance
+	// Wait for acceptance (JSON)
 	decoder := json.NewDecoder(dataConn)
 	var resp Message
 	if err := decoder.Decode(&resp); err != nil {
@@ -422,7 +426,12 @@ func (m *Manager) SendFile(peerID string, filePath string) error {
 		return fmt.Errorf("transfer rejected: %s", resp.Type)
 	}
 
-	// Send file data
+	// Send binary file header [magic:4][size:8]
+	if err := WriteFileHeader(dataConn, info.Size()); err != nil {
+		return fmt.Errorf("failed to write file header: %w", err)
+	}
+
+	// Send raw file data
 	written, err := io.Copy(dataConn, file)
 	if err != nil {
 		return fmt.Errorf("failed to send file data: %w", err)
