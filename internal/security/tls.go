@@ -102,14 +102,9 @@ func GenerateSelfSignedCert(certDir, deviceID string) (*tls.Certificate, error) 
 
 func CreateTLSConfig(cert *tls.Certificate) *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-		ClientAuth:   tls.RequireAnyClientCert,
-		MinVersion:   tls.VersionTLS13,
-		CipherSuites: []uint16{
-			tls.TLS_AES_256_GCM_SHA384,
-			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_CHACHA20_POLY1305_SHA256,
-		},
+		Certificates:       []tls.Certificate{*cert},
+		ClientAuth:         tls.RequireAnyClientCert,
+		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true,
 	}
 }
