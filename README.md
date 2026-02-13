@@ -1,0 +1,1 @@
+![klip-256.png](cmd/ghostclip/assets/klip-256.png)
