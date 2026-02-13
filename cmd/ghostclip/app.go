@@ -126,7 +126,6 @@ func (app *Application) initializeComponents(cfg *Config, deviceID string) error
 	if err != nil {
 		return fmt.Errorf("certificate generation failed: %w", err)
 	}
-	tlsConfig := security.CreateTLSConfig(cert)
 
 	app.updateStatus("Initializing clipboard")
 	cb, err := clipboard.New()
@@ -136,7 +135,7 @@ func (app *Application) initializeComponents(cfg *Config, deviceID string) error
 	app.clipboard = cb
 
 	app.updateStatus("Starting network")
-	app.p2pMgr = p2p.NewManager(deviceID, cfg.DeviceName, cfg.Port, tlsConfig, app.logger)
+	app.p2pMgr = p2p.NewManager(deviceID, cfg.DeviceName, cfg.Port, cert, app.logger)
 
 	app.p2pMgr.SetOnMessage(app.handleClipboardSync)
 	app.p2pMgr.SetOnFileReceive(app.handleIncomingFile)
