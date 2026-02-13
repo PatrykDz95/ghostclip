@@ -84,7 +84,12 @@ func (m *Manager) Listen() error {
 				"cipher", cipherSuiteName(tlsConn.ConnectionState().CipherSuite),
 			)
 
-			go m.handleConnection(tlsConn, false)
+			go func() {
+				err := m.handleConnection(tlsConn, false)
+				if err != nil {
+					m.logger.Error("Connection handling error", "error", err)
+				}
+			}()
 		}
 	}()
 
@@ -93,9 +98,9 @@ func (m *Manager) Listen() error {
 
 // Connect establishes a TLS connection to a peer
 func (m *Manager) Connect(deviceID, address string) error {
-	m.mu.RLock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	_, exists := m.peers[deviceID]
-	m.mu.RUnlock()
 
 	if exists {
 		return nil // already connected
