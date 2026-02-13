@@ -1,1 +1,0 @@
-![ghostclip_logox400.png](cmd/ghostclip/assets/ghostclip_logox400.png)

@@ -8,7 +8,7 @@ import (
 	"github.com/getlantern/systray"
 )
 
-//go:embed assets/ghostclip_logox48.ico
+//go:embed assets/klip-48.png
 var iconData []byte
 
 func main() {
