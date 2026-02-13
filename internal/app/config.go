@@ -1,6 +1,8 @@
-package main
+package app
 
 import "flag"
+
+const defaultPort = 9876
 
 type Config struct {
 	Verbose    bool
