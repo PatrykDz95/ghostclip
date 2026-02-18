@@ -2,15 +2,14 @@ package main
 
 import (
 	_ "embed"
+	"ghostclip/internal/app"
 	"io"
 	"log"
-
-	"ghostclip/internal/app"
 
 	"github.com/getlantern/systray"
 )
 
-//go:embed assets/klip-48.png
+//go:embed assets/klip-512.ico
 var iconData []byte
 
 func main() {
