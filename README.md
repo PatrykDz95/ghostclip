@@ -1,1 +1,1 @@
-![klip-256.png](cmd/ghostclip/assets/klip-256.png)
+![klip-256.png](cmd/klip/assets/klip-256.png)
