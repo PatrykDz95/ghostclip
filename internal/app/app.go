@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"sync"
 
 	"github.com/getlantern/systray"
 )
@@ -23,6 +24,9 @@ type Application struct {
 
 	ui       *UI
 	iconData []byte
+
+	clipboardClearCancel context.CancelFunc
+	clipboardClearMu     sync.Mutex
 }
 
 func NewApplication(iconData []byte) *Application {
