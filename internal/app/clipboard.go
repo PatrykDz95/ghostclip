@@ -48,7 +48,6 @@ func (app *Application) cancelClipboardClear() {
 
 // clears clipboard after specified duration
 func (app *Application) scheduleClearClipboard(delay time.Duration) {
-	// Create cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Store cancel function
